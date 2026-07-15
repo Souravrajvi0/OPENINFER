@@ -1,0 +1,15 @@
+node_modules/
+images/
+dist/
+.env
+client_secret_*.json
+*.local
+*.log
+.DS_Store
+Thumbs.db
+coverage/
+.nyc_output/
+/package-lock.json
+infra/nginx/certs/
+*.tsbuildinfo
+web/src/data/oi-models.json
