@@ -1,0 +1,71 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches: [production]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to droplet via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          command_timeout: 10m
+          script: |
+            set -e
+            cd /opt/sentinelai/SentinelAI
+
+            # Pull latest code from GitHub (production is the live release branch)
+            git fetch origin production
+            git reset --hard origin/production
+
+            # Rebuild only changed service images, restart in place.
+            # Gateway runs pending SQL migrations on container start before listening.
+            docker compose up -d --build --remove-orphans
+
+            # Redis entrypoint demotes replicas on start; verify writable after recreate.
+            echo "Ensuring Redis is writable..."
+            docker compose exec -T redis redis-cli REPLICAOF NO ONE 2>/dev/null || true
+            docker compose exec -T redis redis-cli SET oi:deploy:probe 1 EX 30
+            role=$(docker compose exec -T redis redis-cli INFO replication | grep '^role:' | tr -d '\r')
+            echo "Redis $role"
+            if [ "$role" != "role:master" ]; then
+              echo "ERROR: Redis is not master — rate limits and queues need a writable node"
+              exit 1
+            fi
+
+            # nginx caches the gateway's upstream IP at startup; when the gateway
+            # container is recreated above it gets a new docker-network IP, so nginx
+            # keeps proxying to the dead IP and every request 502s. Restart it so it
+            # re-resolves the upstream.
+            docker compose restart nginx
+
+            # Wait for gateway to become healthy (45s max)
+            echo "Waiting for gateway health..."
+            healthy=0
+            for i in $(seq 1 15); do
+              if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+                echo "Gateway healthy after $((i * 3))s"
+                healthy=1
+                break
+              fi
+              sleep 3
+            done
+
+            if [ "$healthy" -eq 0 ]; then
+              echo "ERROR: Gateway did not become healthy after 45s"
+              docker compose logs gateway --tail=50
+              exit 1
+            fi
+
+            # Show running containers
+            docker compose ps
