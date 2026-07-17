@@ -220,8 +220,6 @@ oi                     # interactive shell: chat + /search, /install, /setup
 - **SHA-256 for API keys** — high-entropy random strings don't need bcrypt's slowness
 - **Fire-and-forget spans + eval** — observability failures never block client responses
 
-See [`IDEA.txt`](./IDEA.txt) for the full engineering journal including design decisions, challenges faced, and inspiration sources.
-
 ---
 
 ## Project Structure
@@ -275,13 +273,3 @@ The gateway container runs pending SQL migrations from `services/gateway/migrati
 Required repository secrets: `DROPLET_IP`, `DROPLET_USER`, `SSH_PRIVATE_KEY`.
 
 Branch flow: `dev` → `main` → `production`. Only `production` triggers deploy.
-
----
-
-## Interview / Learning Docs
-
-The [`interview/`](./interview/) directory contains 6 guides that explain every concept used in this project from the ground up — from "what is an LLM" to deep dives on RAG, vector search, and system design trade-offs.
-
----
-
-*Built as a portfolio project targeting AI infrastructure and backend platform engineering roles.*
