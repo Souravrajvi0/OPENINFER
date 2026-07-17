@@ -13,3 +13,8 @@ coverage/
 infra/nginx/certs/
 *.tsbuildinfo
 web/src/data/oi-models.json
+
+# Personal notes — kept local, not part of the public repo
+IDEA.txt
+plan.md
+interview/

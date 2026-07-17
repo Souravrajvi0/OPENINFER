@@ -1,5 +1,9 @@
 # OpenInference
 
+**The governed layer between your apps and every LLM.**
+
+Most teams wire their apps straight to LLM APIs — no guardrails, no cost limits, no audit trail, and no way to explain *why* a response was bad. One prompt-injection, one leaked PII field, or one runaway agent loop, and you find out in production. OpenInference puts one controlled, observable gateway in front of every provider so you get security, routing, RAG, and full traces without changing how your apps call the model.
+
 A self-hosted AI platform in one monorepo. It ships two things:
 
 1. **Gateway & observability platform** — routes requests to LLMs, enforces security policies, retrieves enterprise documents (RAG), runs agent workflows, and records full traces.
@@ -21,7 +25,7 @@ Client → Nginx → Gateway (Fastify)
                     └── Response
 ```
 
-**Live:** `http://64.227.178.3` · **API docs:** `http://64.227.178.3/api-docs`
+**Live:** [openinference.tech](https://openinference.tech) · **API docs:** [openinference.tech/api-docs](https://openinference.tech/api-docs)
 
 ---
 
