@@ -1,6 +1,11 @@
-# OpenInference (SentinelAI)
+# OpenInference
 
-A self-hosted AI gateway and observability platform. Routes requests to LLMs, enforces security policies, retrieves enterprise documents (RAG), runs agent workflows, and records full traces — all in one deployable stack.
+A self-hosted AI platform in one monorepo. It ships two things:
+
+1. **Gateway & observability platform** — routes requests to LLMs, enforces security policies, retrieves enterprise documents (RAG), runs agent workflows, and records full traces.
+2. **`oi` CLI** — a hardware-aware package manager for *local* AI models: search, install, run, and chat with the right open-source model for your machine.
+
+This README covers the gateway. See [`packages/cli/README.md`](./packages/cli/README.md) for the CLI.
 
 ```
 Client → Nginx → Gateway (Fastify)
@@ -59,8 +64,8 @@ GitHub Actions             CI/CD → DigitalOcean droplet
 **Prerequisites:** Docker, Docker Compose, at least one LLM API key.
 
 ```bash
-git clone https://github.com/Souravrajvi0/SentinelAI.git
-cd SentinelAI
+git clone https://github.com/Souravrajvi0/OPENINFER.git
+cd OPENINFER
 cp .env.example .env
 # Edit .env — add at minimum GROQ_API_KEY and JWT_SECRET
 docker compose up -d
@@ -194,6 +199,19 @@ EMBEDDING_DIMENSIONS=1024
 
 ---
 
+## `oi` CLI
+
+The repo also contains `@openinference/cli` — a standalone, hardware-aware package manager for **local** models (installed separately from the gateway).
+
+```bash
+npm install -g @openinference/cli
+oi                     # interactive shell: chat + /search, /install, /setup
+```
+
+`oi` scans your RAM, CPU, GPU, and disk, filters 150+ open-source models down to the ones that will actually run on your machine, then installs and runs them via a local engine (Ollama today). Full docs: [`packages/cli/README.md`](./packages/cli/README.md).
+
+---
+
 ## Architecture Decisions
 
 - **Fastify over Express** — built-in schema validation, plugin system, lower overhead
@@ -210,6 +228,7 @@ See [`IDEA.txt`](./IDEA.txt) for the full engineering journal including design d
 
 ```
 web/src/                     React dashboard (playground, admin, traces, agents…)
+packages/cli/                @openinference/cli — hardware-aware local-model manager (oi)
 shared/src/types.ts          Shared TypeScript types + Provider union
 services/gateway/src/
   app.ts                     Fastify app setup, plugin registration
