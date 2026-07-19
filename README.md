@@ -23,6 +23,8 @@ Client or SDK
 ```
 
 The production site is [openinference.tech](https://openinference.tech). Local API docs are served at `http://localhost:3000/api-docs`.
+Judges: start with Quick Start, First API Call, and Project Layout for the fastest review path.
+This branch is a documentation-focused snapshot; it does not change runtime behavior.
 
 ## Main Features
 
