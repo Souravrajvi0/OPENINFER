@@ -1,279 +1,399 @@
 # OpenInference
 
-**The governed layer between your apps and every LLM.**
+OpenInference is a self-hosted gateway for LLM applications. It gives teams one controlled API in front of hosted and local models, with routing, guardrails, retrieval, budgets, tracing, evaluations, and an admin console.
 
-Most teams wire their apps straight to LLM APIs — no guardrails, no cost limits, no audit trail, and no way to explain *why* a response was bad. One prompt-injection, one leaked PII field, or one runaway agent loop, and you find out in production. OpenInference puts one controlled, observable gateway in front of every provider so you get security, routing, RAG, and full traces without changing how your apps call the model.
+This repository also includes `oi`, a hardware-aware CLI for finding, installing, and running local open-source models. See [packages/cli/README.md](./packages/cli/README.md) for the CLI guide.
 
-A self-hosted AI platform in one monorepo. It ships two things:
+## What It Does
 
-1. **Gateway & observability platform** — routes requests to LLMs, enforces security policies, retrieves enterprise documents (RAG), runs agent workflows, and records full traces.
-2. **`oi` CLI** — a hardware-aware package manager for *local* AI models: search, install, run, and chat with the right open-source model for your machine.
+Applications call OpenInference instead of calling model providers directly. The gateway then handles policy, routing, model execution, observability, and persistence before returning a response.
 
-This README covers the gateway. See [`packages/cli/README.md`](./packages/cli/README.md) for the CLI.
-
-```
-Client → Nginx → Gateway (Fastify)
-                    ├── Auth + Rate Limiting (Redis)
-                    ├── Guardrails (injection, PII)
-                    ├── Semantic Cache (pgvector)
-                    ├── Model Router + A/B Experiments
-                    ├── Session Memory + Context Guard
-                    ├── RAG Retrieval (Hybrid Search)
-                    ├── LLM Call (retry + fallback)
-                    ├── Trace Spans → Postgres
-                    ├── Eval Job → BullMQ → Eval Worker
-                    └── Response
+```text
+Client or SDK
+  -> Gateway API (Fastify)
+      -> auth, scopes, rate limits
+      -> guardrails and PII handling
+      -> budget checks
+      -> model routing, A/B tests, fallback
+      -> optional RAG retrieval
+      -> hosted provider or self-hosted Ollama
+      -> traces, audit logs, metrics
+      -> async evaluation jobs
+  -> Response
 ```
 
-**Live:** [openinference.tech](https://openinference.tech) · **API docs:** [openinference.tech/api-docs](https://openinference.tech/api-docs)
+The production site is [openinference.tech](https://openinference.tech). Local API docs are served at `http://localhost:3000/api-docs`.
 
----
+## Main Features
 
-## Features
-
-| Feature | Details |
-|---|---|
-| Multi-provider routing | OpenAI, Anthropic, Groq, Mistral, Cerebras, Gemini |
-| Retry + fallback | Exponential backoff, automatic provider failover |
-| Guardrails | Prompt injection detection, PII redaction |
-| Semantic cache | pgvector cosine ≥ 0.95, 24h TTL |
-| RAG | Hybrid vector + keyword search, RRF reranking |
-| Conversation memory | Server-side sessions, context window auto-compression |
-| A/B experiments | Probabilistic traffic split, variant tagged in response |
-| Cost budgets | Monthly limits per tenant, webhook alerts |
-| Eval worker | Faithfulness, relevance, coherence scored async |
-| Observability | OTel-style spans, Prometheus metrics, Grafana dashboard |
-| Admin API | Keys, budgets, experiments, cache management |
-| Audit logs | Append-only compliance trail |
-
----
+| Area | Capabilities |
+| --- | --- |
+| Unified model API | Native `/v1/chat` plus OpenAI-compatible `/v1/chat/completions` and `/v1/models` |
+| Providers | OpenAI, Anthropic, Groq, Mistral, Cerebras, Gemini, and self-hosted Ollama |
+| Routing | Provider/model pinning, default routing, fallback models, model catalog, plan tiers |
+| Safety | Prompt-injection checks, PII redaction, configurable guardrail policies |
+| Cost control | Tenant budgets, API-key budgets, platform budget, request accounting |
+| Retrieval | Document upload, async chunking and embedding, hybrid vector plus keyword search |
+| Agents | Tool-running agent endpoint, agent registry, tool policies, human approvals, MCP server governance |
+| Observability | Request records, trace spans, audit logs, Prometheus metrics, Grafana dashboard |
+| Evaluation | Async response scoring through BullMQ eval workers |
+| Admin console | React dashboard for keys, providers, models, docs, traces, sessions, budgets, agents, guardrails, documents, and regression tests |
 
 ## Stack
 
-```
-Node.js 20 + TypeScript    Fastify HTTP server
-PostgreSQL 16 + pgvector   Primary DB + vector search
-Redis 7                    Rate limiting + BullMQ queues
-BullMQ                     Async eval + ingestion jobs
-Prometheus + Grafana       Metrics + dashboards
-Nginx                      Reverse proxy
-Docker Compose             8-service local/production stack
-GitHub Actions             CI/CD → DigitalOcean droplet
-```
-
----
+| Layer | Technology |
+| --- | --- |
+| API | Node.js 20, TypeScript, Fastify |
+| Web | React 19, Vite, TanStack Router |
+| Data | PostgreSQL 16 with pgvector |
+| Queues/cache | Redis 7, BullMQ |
+| Local inference | Ollama |
+| Observability | Prometheus, Grafana, structured request logs |
+| Packaging | npm workspaces, Docker Compose |
 
 ## Quick Start
 
-**Prerequisites:** Docker, Docker Compose, at least one LLM API key.
+### Prerequisites
+
+- Docker and Docker Compose
+- Node.js 20+ if you want to run services outside Docker
+- At least one LLM provider key for the default route. The sample env uses Groq by default.
+
+### Run the full stack
 
 ```bash
 git clone https://github.com/Souravrajvi0/OPENINFER.git
 cd OPENINFER
 cp .env.example .env
-# Edit .env — add at minimum GROQ_API_KEY and JWT_SECRET
-docker compose up -d
 ```
 
-The seed script creates a dev tenant and API key `sentinel-dev-key` automatically.
+On Windows PowerShell:
 
-Test it:
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` and set at minimum:
+
+```bash
+JWT_SECRET=replace-with-a-long-random-secret
+GROQ_API_KEY=gsk_...
+DEFAULT_PROVIDER=groq
+DEFAULT_MODEL=llama-3.3-70b-versatile
+```
+
+Then start the stack:
+
+```bash
+docker compose up --build
+```
+
+Useful local URLs:
+
+| Service | URL |
+| --- | --- |
+| Web app and gateway | `http://localhost:3000` |
+| Swagger/OpenAPI docs | `http://localhost:3000/api-docs` |
+| Health check | `http://localhost:3000/health` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3001` |
+
+Grafana uses password `sentinelai` in the local compose file.
+
+The database seed creates a development tenant and API key:
+
+```text
+sentinel-dev-key
+```
+
+Use it only for local development.
+
+## First API Call
+
+Native gateway API:
+
 ```bash
 curl -X POST http://localhost:3000/v1/chat \
   -H "X-Api-Key: sentinel-dev-key" \
   -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{
+    "messages": [
+      { "role": "user", "content": "Explain RAG in one sentence." }
+    ]
+  }'
 ```
 
-API docs: `http://localhost:3000/api-docs`
+OpenAI-compatible API:
 
----
+```bash
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Authorization: Bearer sentinel-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.3-70b-versatile",
+    "messages": [
+      { "role": "user", "content": "Write a haiku about observability." }
+    ]
+  }'
+```
 
-## API Reference
+List the models available to the current key:
 
-### POST /v1/chat
-Send a message to an LLM through the gateway.
+```bash
+curl http://localhost:3000/v1/models \
+  -H "Authorization: Bearer sentinel-dev-key"
+```
+
+## Core Endpoints
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/chat` | Native chat API with routing, sessions, RAG, guardrails, budgets, tracing, and eval jobs |
+| `GET` | `/v1/models` | OpenAI-shaped model list filtered by provider config, tenant plan, and key allowlist |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions-compatible endpoint |
+| `POST` | `/v1/retrieve` | Search indexed documents |
+| `POST` | `/v1/documents` | Ingest text content for retrieval |
+| `POST` | `/v1/documents/upload` | Upload `.txt`, `.md`, or `.pdf` documents up to 10 MB |
+| `POST` | `/v1/agent` | Run an agent workflow with tool access |
+| `GET` | `/v1/traces/:traceId` | Inspect trace spans for a request |
+| `GET` | `/v1/sessions/:sessionId` | Read stored conversation memory |
+| `GET` | `/metrics` | Prometheus metrics |
+
+Admin routes live under `/v1/admin/*` and require an API key or user session with admin scope.
+
+## Native Chat Request
 
 ```json
 {
-  "messages": [{"role": "user", "content": "Explain RAG in one sentence"}],
+  "messages": [
+    { "role": "user", "content": "Explain semantic caching." }
+  ],
   "provider": "groq",
   "model": "llama-3.3-70b-versatile",
   "stream": false,
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "rag": {"enabled": true, "top_k": 5}
+  "rag": {
+    "enabled": true,
+    "top_k": 5
+  },
+  "metadata": {
+    "app": "support-bot"
+  }
 }
 ```
 
-Response:
+Typical response:
+
 ```json
 {
-  "id": "...",
-  "trace_id": "...",
-  "content": "RAG is a technique that...",
+  "id": "request-id",
+  "trace_id": "trace-id",
+  "content": "Semantic caching stores and reuses responses for meaningfully similar prompts.",
   "model": "llama-3.3-70b-versatile",
   "provider": "groq",
-  "usage": {"prompt_tokens": 12, "completion_tokens": 45, "cost_usd": 0.0},
-  "latency_ms": 423,
-  "session_id": "550e8400-...",
-  "session_turn": 1,
-  "context_compressed": false
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 18,
+    "total_tokens": 30,
+    "cost_usd": 0.00001
+  },
+  "latency_ms": 423
 }
 ```
 
-### POST /v1/retrieve
-Hybrid search over indexed documents.
+## Retrieval Workflow
 
-```json
-{
-  "query": "How does our refund policy work?",
-  "top_k": 5,
-  "hybrid": true
-}
-```
-
-### POST /v1/documents
-Upload a document for RAG indexing.
+Add a text document:
 
 ```bash
 curl -X POST http://localhost:3000/v1/documents \
+  -H "X-Api-Key: sentinel-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Refund Policy",
+    "content": "Refunds are available within 30 days of purchase."
+  }'
+```
+
+Upload a file:
+
+```bash
+curl -X POST http://localhost:3000/v1/documents/upload \
   -H "X-Api-Key: sentinel-dev-key" \
   -F "file=@policy.pdf" \
   -F "title=Refund Policy"
 ```
 
-### POST /v1/agent
-Run a ReAct agent with tool use. Supports streaming via SSE.
-
-```json
-{
-  "task": "Search for the latest news on AI safety and summarize",
-  "tools": ["web_search", "calculator"],
-  "stream": true
-}
-```
-
-### GET /v1/traces/:traceId
-Full span timeline for any request.
-
-### GET /v1/sessions/:sessionId
-Retrieve conversation history + summary for a session.
-
-### Admin endpoints (require `admin` scope)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/v1/admin/keys` | Create API key |
-| DELETE | `/v1/admin/keys/:id` | Revoke API key |
-| POST | `/v1/admin/budget` | Set monthly spend limit |
-| POST | `/v1/admin/experiments` | Create A/B experiment |
-| GET | `/v1/admin/cache/stats` | Semantic cache hit rate |
-| DELETE | `/v1/admin/cache` | Flush cache |
-
----
-
-## Environment Variables
+Search indexed content:
 
 ```bash
-# Required
-JWT_SECRET=your-32-char-secret-minimum
+curl -X POST http://localhost:3000/v1/retrieve \
+  -H "X-Api-Key: sentinel-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How do refunds work?",
+    "top_k": 5,
+    "hybrid": true
+  }'
+```
 
-# Database + Cache (Docker Compose sets these automatically)
-DATABASE_URL=postgresql://sentinel:sentinel@postgres:5432/openinference
-REDIS_URL=redis://redis:6379
+Use retrieval during chat:
 
-# LLM providers — add at least one
+```bash
+curl -X POST http://localhost:3000/v1/chat \
+  -H "X-Api-Key: sentinel-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "user", "content": "What is our refund window?" }
+    ],
+    "rag": { "enabled": true, "top_k": 5 }
+  }'
+```
+
+RAG embeddings use Mistral by default, so set `MISTRAL_API_KEY` when using document retrieval.
+
+## Local Development
+
+Install root workspace dependencies:
+
+```bash
+npm install
+```
+
+Run infrastructure only:
+
+```bash
+docker compose up -d postgres redis
+```
+
+Run the gateway:
+
+```bash
+npm run dev -w @sentinelai/gateway
+```
+
+Run workers in separate terminals:
+
+```bash
+npm run dev -w @sentinelai/ingestion-worker
+npm run dev -w @sentinelai/eval-worker
+```
+
+Run the web app in dev mode:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/v1`, `/health`, and `/api-docs` to `http://localhost:3000` by default. Set `API_TARGET` if your gateway runs elsewhere.
+
+Common checks:
+
+```bash
+npm run build
+npm run typecheck
+npm run lint
+npm test -w @sentinelai/gateway
+```
+
+## Environment
+
+The main env file is `.env`, usually copied from [.env.example](./.env.example).
+
+Required for local gateway startup:
+
+```bash
+JWT_SECRET=replace-with-a-long-random-secret
+DATABASE_URL=postgresql://sentinel:sentinel@localhost:5432/openinference
+REDIS_URL=redis://localhost:6379
+```
+
+Configure at least one model provider:
+
+```bash
 GROQ_API_KEY=gsk_...
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 MISTRAL_API_KEY=...
-CEREBRAS_API_KEY=...
+CEREBRAS_API_KEY=csk-...
 GEMINI_API_KEY=...
+OLLAMA_URL=http://ollama:11434
+```
 
-# Routing defaults
+Routing defaults:
+
+```bash
 DEFAULT_PROVIDER=groq
 DEFAULT_MODEL=llama-3.3-70b-versatile
 FALLBACK_PROVIDER=groq
 FALLBACK_MODEL=llama-3.1-8b-instant
-
-# Embeddings (for RAG)
-MISTRAL_EMBEDDING_MODEL=mistral-embed
-EMBEDDING_DIMENSIONS=1024
 ```
 
----
+## Project Layout
 
-## `oi` CLI
-
-The repo also contains `@openinference/cli` — a standalone, hardware-aware package manager for **local** models (installed separately from the gateway).
-
-```bash
-npm install -g @openinference/cli
-oi                     # interactive shell: chat + /search, /install, /setup
+```text
+.
+|-- services/
+|   |-- gateway/            Fastify API, auth, routing, guardrails, admin routes
+|   |-- ingestion-worker/   BullMQ worker for document chunking and embeddings
+|   `-- eval-worker/        BullMQ worker for response quality evaluation
+|-- web/                    React admin console, playground, docs, and marketing pages
+|-- shared/                 Shared TypeScript types and queue constants
+|-- packages/
+|   `-- cli/                `oi` local model CLI
+|-- infra/
+|   |-- postgres/           Schema and seed data
+|   |-- redis/              Redis startup wrapper
+|   |-- prometheus/         Metrics config and alerts
+|   |-- grafana/            Dashboard provisioning
+|   `-- nginx/              Reverse proxy config
+|-- docker-compose.yml      Full local/production-style stack
+`-- package.json            Root npm workspace for shared, services, and packages
 ```
-
-`oi` scans your RAM, CPU, GPU, and disk, filters 150+ open-source models down to the ones that will actually run on your machine, then installs and runs them via a local engine (Ollama today). Full docs: [`packages/cli/README.md`](./packages/cli/README.md).
-
----
-
-## Architecture Decisions
-
-- **Fastify over Express** — built-in schema validation, plugin system, lower overhead
-- **pgvector over dedicated vector DB** — one database, joins work, no extra service to run
-- **BullMQ over setTimeout** — jobs survive restarts, retries built-in, monitorable
-- **SHA-256 for API keys** — high-entropy random strings don't need bcrypt's slowness
-- **Fire-and-forget spans + eval** — observability failures never block client responses
-
----
-
-## Project Structure
-
-```
-web/src/                     React dashboard (playground, admin, traces, agents…)
-packages/cli/                @openinference/cli — hardware-aware local-model manager (oi)
-shared/src/types.ts          Shared TypeScript types + Provider union
-services/gateway/src/
-  app.ts                     Fastify app setup, plugin registration
-  config.ts                  Zod-validated environment config
-  routes/
-    chat.ts                  POST /v1/chat — main gateway handler
-    agent.ts                 POST /v1/agent — ReAct agent runtime
-    retrieve.ts              POST /v1/retrieve — hybrid RAG search
-    documents.ts             Document upload + ingestion trigger
-    admin.ts                 Key/budget/experiment management
-    sessions.ts              Conversation session CRUD
-    traces.ts                Trace viewer + audit logs
-  services/
-    llm.ts                   Provider abstraction + retry logic
-    router.ts                Routing rules + A/B experiment logic
-    guardrails.ts            Injection detection + PII redaction
-    semanticCache.ts         pgvector similarity cache
-    conversationMemory.ts    Session load/save + context guard
-    budget.ts                Monthly spend tracking
-    audit.ts                 Append-only audit log writer
-    agentRuntime.ts          ReAct tool-calling loop
-    tracer.ts                OTel-style span management
-services/ingestion-worker/   BullMQ worker: chunk + embed documents
-services/eval-worker/        BullMQ worker: score response quality
-infra/
-  postgres/init.sql          Full DB schema
-  prometheus/                Scrape config + alert rules
-  grafana/                   Dashboard provisioning
-```
-
----
 
 ## Deployment
 
-Runs on DigitalOcean via Docker Compose. GitHub Actions deploys on every push to **`production`** (not `main`):
+The Docker Compose stack includes:
 
-```yaml
-# .github/workflows/deploy.yml
-# SSH → git pull → docker compose up --build → health check
+- `gateway` on port `3000`
+- `postgres` with pgvector
+- `redis`
+- `ollama`
+- `ingestion-worker`
+- `eval-worker`
+- `prometheus`
+- `grafana`
+- `nginx`
+
+The gateway image builds the React app and serves the compiled SPA from the Fastify process. SQL migrations in `services/gateway/migrations` run before the gateway starts.
+
+GitHub Actions deployment is configured for the `production` branch. Required repository secrets are:
+
+```text
+DROPLET_IP
+DROPLET_USER
+SSH_PRIVATE_KEY
 ```
 
-The gateway container runs pending SQL migrations from `services/gateway/migrations/` on startup before accepting traffic.
+Expected branch flow:
 
-Required repository secrets: `DROPLET_IP`, `DROPLET_USER`, `SSH_PRIVATE_KEY`.
+```text
+dev -> main -> production
+```
 
-Branch flow: `dev` → `main` → `production`. Only `production` triggers deploy.
+Only `production` deploys.
+
+## Security Notes
+
+- Do not use `sentinel-dev-key` outside local development.
+- API keys are stored as SHA-256 hashes; raw keys are returned only at creation time.
+- Use a long random `JWT_SECRET` in every deployed environment.
+- Keep provider keys in `.env` or your deployment secret store, not in source control.
+- Admin endpoints require `admin` scope or an authenticated admin session.
+
+## CLI
+
+The CLI scans local hardware, recommends models that fit, installs them through Ollama, and launches local chat. Full documentation is in [packages/cli/README.md](./packages/cli/README.md).
