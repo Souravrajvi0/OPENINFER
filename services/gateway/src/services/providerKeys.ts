@@ -1,9 +1,11 @@
 import { queryAsSystem } from '../db/client';
+import { tenantStore } from '../db/tenantContext';
 import { config } from '../config';
 import { encryptSecret, decryptSecret } from './secrets';
+import { getTenantProviderApiKey } from './providers';
 
-// Providers whose keys can be managed from the dashboard. Ollama is excluded
-// (self-hosted, no key). Dashboard-stored keys override the env fallback.
+// Built-in providers whose keys can be managed as legacy platform/gateway defaults.
+// Per-org keys live in tenant_provider_keys (providers.ts). Ollama needs no key.
 export const KEY_PROVIDERS = ['openai', 'anthropic', 'groq', 'mistral', 'cerebras', 'gemini'] as const;
 export type KeyProvider = (typeof KEY_PROVIDERS)[number];
 
@@ -22,9 +24,6 @@ function envKey(provider: KeyProvider): string | null {
   }
 }
 
-// Short-lived cache of DB overrides so the hot path doesn't hit Postgres on
-// every LLM call. Writes invalidate immediately on this instance; other
-// instances converge within the TTL.
 const CACHE_TTL_MS = 30_000;
 const dbKeyCache = new Map<KeyProvider, { value: string | null; expires: number }>();
 
@@ -46,10 +45,25 @@ export function invalidateProviderKeyCache(provider?: KeyProvider): void {
   else dbKeyCache.clear();
 }
 
-/** Resolve the API key for a provider: dashboard-stored key first, env fallback. */
-export async function getProviderApiKey(provider: string): Promise<string | null> {
+/**
+ * Resolve the API key for a provider.
+ * - With tenant context (or explicit tenantId): org key, or platform key if org opted in.
+ * - Without tenant: platform provider_keys then env (workers / bootstrap).
+ */
+export async function getBootstrapProviderApiKey(provider: string): Promise<string | null> {
   if (!isKeyProvider(provider)) return null;
   return (await dbKey(provider)) ?? envKey(provider);
+}
+
+export async function getProviderApiKey(
+  provider: string,
+  tenantId?: string | null,
+): Promise<string | null> {
+  const tid = tenantId ?? tenantStore.getStore() ?? null;
+  if (tid) {
+    return getTenantProviderApiKey(tid, provider);
+  }
+  return getBootstrapProviderApiKey(provider);
 }
 
 function mask(key: string | null): string | null {

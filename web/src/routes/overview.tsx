@@ -131,7 +131,7 @@ const SUGGESTIONS = [
 export function Overview() {
   return (
     <div className="bg-cream text-ink">
-      {/* Hero — split grid; min-height matches pre–CLI-box layout so flame rows keep cream gaps */}
+      {/* Hero — split grid; matches CLI page's hero exactly (cols/rows + 80vh) */}
       <section className="grid grid-cols-1 border-b border-border lg:grid-cols-[1fr_380px] lg:min-h-[80vh]">
         <div className="relative min-h-[52vh] overflow-hidden border-b border-border sm:min-h-[60vh] lg:min-h-[80vh] lg:border-b-0">
           <div className="absolute inset-0">

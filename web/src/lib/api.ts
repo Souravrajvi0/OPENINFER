@@ -33,7 +33,7 @@ export async function api<T = any>(
     ...rest,
     headers: {
       ...authHeaders(key),
-      ...(rest.body ? { "content-type": "application/json" } : {}),
+      ...(rest.body && !(rest.body instanceof FormData) ? { "content-type": "application/json" } : {}),
       ...(headers || {}),
     },
   });
@@ -58,11 +58,20 @@ export async function api<T = any>(
   }
   if (!res.ok) {
     const msg =
-      (body && (body.error?.message || (typeof body.error === "string" ? body.error : null))) ||
+      (body && (
+        (typeof body.error === "string" ? body.error : null) ||
+        body.error?.message ||
+        (typeof body.message === "string" ? body.message : null)
+      )) ||
       "HTTP " + res.status;
     throw new Error(msg);
   }
   return body as T;
+}
+
+/** Multipart upload helper — do not set Content-Type (browser sets boundary). */
+export async function apiUpload<T = any>(path: string, form: FormData, key?: string): Promise<T> {
+  return api<T>(path, { method: "POST", body: form, key });
 }
 
 // ── Model catalog (mirrors the gateway's plan tiers) ──
