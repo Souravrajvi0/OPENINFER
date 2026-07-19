@@ -11,6 +11,7 @@ interface ApiKeyRow {
   rate_limit_rpm: number;
   rate_limit_tpm: number;
   plan: string;
+  allowed_models: string[] | null;
 }
 
 declare module 'fastify' {
@@ -24,6 +25,7 @@ declare module 'fastify' {
     plan: string;
     orgRole: OrgRole | null;
     isPlatformAdmin: boolean;
+    allowedModels: string[] | null;
   }
   interface FastifyInstance {
     verifyApiKey: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -33,6 +35,7 @@ declare module 'fastify' {
 const authPlugin: FastifyPluginAsync = async (fastify) => {
   fastify.decorate('verifyApiKey', async (request: FastifyRequest, reply: FastifyReply) => {
     const authz = request.headers['authorization'];
+    let bearerApiKey: string | undefined;
     if (authz && authz.startsWith('Bearer ')) {
       try {
         const payload = await request.jwtVerify<{
@@ -60,14 +63,16 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         request.plan = session.plan;
         request.orgRole = session.orgRole;
         request.isPlatformAdmin = session.isPlatformAdmin;
+        request.allowedModels = null;
         return;
       } catch {
-        reply.status(401).send({ error: 'Invalid or expired session' });
-        return;
+        // Not a session JWT — OpenAI SDKs send gateway API keys as
+        // `Authorization: Bearer <key>`, so fall through to the key lookup.
+        bearerApiKey = authz.slice('Bearer '.length).trim();
       }
     }
 
-    const header = request.headers['x-api-key'] as string | undefined;
+    const header = bearerApiKey ?? (request.headers['x-api-key'] as string | undefined);
     if (!header) {
       reply.status(401).send({ error: 'Missing X-Api-Key header or Bearer token' });
       return;
@@ -76,7 +81,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
     const keyHash = createHash('sha256').update(header).digest('hex');
 
     const result = await queryAsSystem<ApiKeyRow>(
-      `SELECT k.id, k.tenant_id, k.scopes, k.rate_limit_rpm, k.rate_limit_tpm, t.plan
+      `SELECT k.id, k.tenant_id, k.scopes, k.rate_limit_rpm, k.rate_limit_tpm, k.allowed_models, t.plan
        FROM api_keys k
        JOIN tenants t ON t.id = k.tenant_id
        WHERE k.key_hash = $1
@@ -100,6 +105,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
     request.plan = key.plan;
     request.orgRole = null;
     request.isPlatformAdmin = false;
+    request.allowedModels = key.allowed_models ?? null;
 
     queryAsSystem('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [key.id]).catch(() => {});
   });

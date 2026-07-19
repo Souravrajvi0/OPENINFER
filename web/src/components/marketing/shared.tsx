@@ -185,7 +185,8 @@ export function SiteFooter() {
         { label: "Playground", to: "/playground" },
         { label: "Inference", to: "/inference" },
         { label: "Models", to: "/models" },
-        { label: "Documents", to: "/docs" },
+        { label: "API access", to: "/docs" },
+        { label: "Documents", to: "/documents" },
         { label: "CLI", to: "/cli" },
         { label: "Updates", to: "/updates" },
       ],
@@ -210,7 +211,7 @@ export function SiteFooter() {
       title: "Account",
       links: [
         { label: "Sign in", to: "/admin" },
-        { label: "API docs", href: "/api-docs" },
+        { label: "API access", to: "/docs" },
       ],
     },
   ];
@@ -224,15 +225,9 @@ export function SiteFooter() {
             <ul className="space-y-2">
               {col.links.map((link) => (
                 <li key={link.label}>
-                  {"to" in link && link.to ? (
-                    <Link to={link.to} className="text-sm text-muted-foreground transition hover:text-ink">
-                      {link.label}
-                    </Link>
-                  ) : (
-                    <a href={(link as { href: string }).href} className="text-sm text-muted-foreground transition hover:text-ink">
-                      {link.label}
-                    </a>
-                  )}
+                  <Link to={link.to} className="text-sm text-muted-foreground transition hover:text-ink">
+                    {link.label}
+                  </Link>
                 </li>
               ))}
             </ul>

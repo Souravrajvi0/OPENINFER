@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Plus, Trash2, Check, Crown, ArrowRight } from "lucide-react";
 import {
   api,
+  MODEL_CATALOG,
   type AuditRow,
   type BudgetStatus,
   type CacheStats,
@@ -19,7 +20,8 @@ import { Modal } from "@/components/ui/overlay";
 import { AuthScreen } from "@/components/AuthScreen";
 
 const usd = (v: unknown) => "$" + Number(v || 0).toFixed(4);
-const TABS = ["Metrics", "Keys", "Budget", "Experiments", "Cache", "Evals", "Documents", "Requests", "Audit"] as const;
+const TABS = ["Metrics", "Keys", "Providers", "Tenants", "Budget", "Experiments", "Cache", "Evals", "Documents", "Requests", "Audit"] as const;
+const PLATFORM_ADMIN_TABS: readonly string[] = ["Providers", "Tenants"];
 type Tab = (typeof TABS)[number];
 
 export function Admin() {
@@ -65,7 +67,7 @@ export function Admin() {
 
       <div className="mx-auto max-w-6xl px-6 py-6">
         <div className="mb-6 flex flex-wrap gap-1 border-b border-border">
-          {TABS.map((t) => (
+          {TABS.filter((t) => !PLATFORM_ADMIN_TABS.includes(t) || isPlatformAdmin).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -81,6 +83,8 @@ export function Admin() {
 
         {tab === "Metrics" && <MetricsPanel />}
         {tab === "Keys" && <KeysPanel />}
+        {tab === "Providers" && isPlatformAdmin && <ProvidersPanel />}
+        {tab === "Tenants" && isPlatformAdmin && <TenantsPanel />}
         {tab === "Budget" && <BudgetPanel />}
         {tab === "Experiments" && <ExperimentsPanel />}
         {tab === "Cache" && <CachePanel />}
@@ -110,7 +114,7 @@ const QUICK_LINKS = [
   { to: "/playground", label: "Playground", desc: "Chat with the gateway" },
   { to: "/inference", label: "Inference", desc: "Run a single request" },
   { to: "/models", label: "Models", desc: "Browse available models" },
-  { to: "/docs", label: "Docs", desc: "API reference & guides" },
+  { to: "/docs", label: "API access", desc: "SDK snippets, auth, endpoints" },
 ];
 
 function Account({
@@ -372,30 +376,118 @@ function MetricsPanel() {
   );
 }
 
+/* ───────────── Key usage snippets ───────────── */
+// Shown once, right when a key is created — the moment the developer needs
+// to know how to call the gateway. Works with any OpenAI SDK via base_url.
+const SNIPPET_LANGS = ["Python", "JavaScript", "curl"] as const;
+type SnippetLang = (typeof SNIPPET_LANGS)[number];
+
+function keySnippet(lang: SnippetLang, origin: string, key: string): string {
+  switch (lang) {
+    case "Python":
+      return `from openai import OpenAI
+
+client = OpenAI(api_key="${key}", base_url="${origin}/v1")
+
+resp = client.chat.completions.create(
+    model="llama-3.1-8b-instant",  # any id from GET /v1/models
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp.choices[0].message.content)`;
+    case "JavaScript":
+      return `import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: "${key}", baseURL: "${origin}/v1" });
+
+const resp = await client.chat.completions.create({
+  model: "llama-3.1-8b-instant", // any id from GET /v1/models
+  messages: [{ role: "user", content: "Hello" }],
+});
+console.log(resp.choices[0].message.content);`;
+    case "curl":
+      return `curl -X POST ${origin}/v1/chat/completions \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": "Hello"}]}'`;
+  }
+}
+
+function KeySnippets({ apiKey }: { apiKey: string }) {
+  const [lang, setLang] = useState<SnippetLang>("Python");
+  const origin = window.location.origin;
+  const code = keySnippet(lang, origin, apiKey);
+
+  return (
+    <div className="mt-3 border-t border-flame-red/20 pt-3">
+      <div className="mb-2 flex flex-wrap items-center gap-1">
+        <span className="mr-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground">Use it with any OpenAI SDK</span>
+        {SNIPPET_LANGS.map((l) => (
+          <button
+            key={l}
+            onClick={() => setLang(l)}
+            className={
+              "px-2 py-1 text-[11px] transition cursor-pointer " +
+              (lang === l ? "bg-ink text-cream" : "text-muted-foreground hover:text-ink")
+            }
+          >
+            {l}
+          </button>
+        ))}
+        <Button variant="outline" className="ml-auto" onClick={() => { navigator.clipboard?.writeText(code); toast.success("Snippet copied"); }}>
+          Copy snippet
+        </Button>
+      </div>
+      <pre className="mono overflow-x-auto border border-border bg-surface p-3 text-[11px] leading-relaxed">{code}</pre>
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        List the models this key can use: <code className="mono">GET {origin}/v1/models</code> with the same header.
+        The native API (<code className="mono">POST /v1/chat</code> with <code className="mono">X-Api-Key</code>) supports sessions, RAG and provider pinning.
+      </p>
+    </div>
+  );
+}
+
 /* ───────────── Keys ───────────── */
 const SCOPES = ["chat", "retrieve", "agent", "admin"] as const;
+type LiveProviderModels = { provider: string; configured: boolean; models: string[]; error?: string };
+
 function KeysPanel() {
   const [keys, setKeys] = useState<KeyRow[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<string[]>(["chat"]);
   const [rpm, setRpm] = useState(60);
+  const [restrictModels, setRestrictModels] = useState(false);
+  const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [newKey, setNewKey] = useState<string | null>(null);
+  // null = not fetched yet, "failed" = endpoint unreachable (static fallback)
+  const [liveModels, setLiveModels] = useState<LiveProviderModels[] | "failed" | null>(null);
 
   const load = () => api<{ data: KeyRow[] }>("/v1/admin/keys").then((r) => setKeys(r.data)).catch((e) => toast.error(e.message));
   useEffect(() => { load(); }, []);
 
+  const loadModels = (refresh = false) => {
+    if (refresh) setLiveModels(null);
+    api<{ data: LiveProviderModels[] }>(`/v1/admin/models${refresh ? "?refresh=1" : ""}`)
+      .then((r) => setLiveModels(r.data?.length ? r.data : "failed"))
+      .catch(() => setLiveModels("failed"));
+  };
+  useEffect(() => { if (restrictModels && liveModels === null) loadModels(); }, [restrictModels]);
+
   async function create() {
     if (!name.trim()) return toast.error("Name required");
     if (!scopes.length) return toast.error("Pick at least one scope");
+    if (restrictModels && !allowedModels.length) return toast.error("Pick at least one model, or turn off the restriction");
     try {
       const r = await api<{ key: string }>("/v1/admin/keys", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), scopes, rate_limit_rpm: rpm }),
+        body: JSON.stringify({
+          name: name.trim(), scopes, rate_limit_rpm: rpm,
+          ...(restrictModels && allowedModels.length ? { allowed_models: allowedModels } : {}),
+        }),
       });
       setNewKey(r.key);
       setCreating(false);
-      setName(""); setScopes(["chat"]); setRpm(60);
+      setName(""); setScopes(["chat"]); setRpm(60); setRestrictModels(false); setAllowedModels([]);
       load();
     } catch (e: any) { toast.error(e.message); }
   }
@@ -418,6 +510,7 @@ function KeysPanel() {
             <code className="mono min-w-0 flex-1 break-all border border-flame-red/30 bg-surface px-2 py-1 text-xs">{newKey}</code>
             <Button onClick={() => { navigator.clipboard?.writeText(newKey); toast.success("Copied"); }}>Copy</Button>
           </div>
+          <KeySnippets apiKey={newKey} />
         </div>
       )}
       <Card className="p-5">
@@ -425,13 +518,24 @@ function KeysPanel() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="border-b border-border text-left text-[10px] uppercase tracking-[0.15em] text-muted-foreground">
-                <th className="py-2 pr-3 font-normal">Name</th><th className="py-2 pr-3 font-normal">Scopes</th><th className="py-2 pr-3 font-normal">RPM</th>
+                <th className="py-2 pr-3 font-normal">Name</th><th className="py-2 pr-3 font-normal">Scopes</th>
+                <th className="py-2 pr-3 font-normal">Models</th><th className="py-2 pr-3 font-normal">RPM</th>
                 <th className="py-2 pr-3 font-normal">Status</th><th className="py-2 pr-3 font-normal">Last used</th><th className="py-2 font-normal"></th></tr></thead>
               <tbody>
                 {keys.map((k) => (
                   <tr key={k.id} className="border-b border-border last:border-0">
                     <td className="py-2 pr-3">{k.name}</td>
                     <td className="py-2 pr-3"><div className="flex flex-wrap gap-1">{k.scopes.map((s) => <Badge key={s}>{s}</Badge>)}</div></td>
+                    <td className="py-2 pr-3">
+                      {!k.allowed_models ? (
+                        <span className="text-muted-foreground">all</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1" title={k.allowed_models.join(", ")}>
+                          {k.allowed_models.slice(0, 2).map((m) => <Badge key={m}>{m}</Badge>)}
+                          {k.allowed_models.length > 2 && <Badge>+{k.allowed_models.length - 2}</Badge>}
+                        </div>
+                      )}
+                    </td>
                     <td className="py-2 pr-3">{k.rate_limit_rpm}</td>
                     <td className="py-2 pr-3"><Badge tone={k.is_active ? "good" : "bad"}>{k.is_active ? "active" : "revoked"}</Badge></td>
                     <td className="py-2 pr-3 text-muted-foreground">{k.last_used_at ? fmtDate(k.last_used_at) : "never"}</td>
@@ -458,9 +562,248 @@ function KeysPanel() {
             ))}
           </div>
         </div>
-        <div className="mb-5"><Label>Rate limit (RPM)</Label><Input type="number" value={rpm} onChange={(e) => setRpm(Number(e.target.value))} /></div>
+        <div className="mb-3"><Label>Rate limit (RPM)</Label><Input type="number" value={rpm} onChange={(e) => setRpm(Number(e.target.value))} /></div>
+        <div className="mb-5">
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input type="checkbox" checked={restrictModels}
+              onChange={(e) => { setRestrictModels(e.target.checked); if (!e.target.checked) setAllowedModels([]); }} />
+            Restrict to specific models
+          </label>
+          {restrictModels && (
+            <div className="mt-2 max-h-56 overflow-y-auto border border-border p-2">
+              {liveModels === null ? (
+                <div className="py-2 text-xs text-muted-foreground">Discovering available models…</div>
+              ) : liveModels === "failed" ? (
+                // Discovery unavailable — fall back to the static catalog
+                MODEL_CATALOG.map((m) => (
+                  <label key={m.provider + m.model} className="flex cursor-pointer items-center gap-2 py-1 text-sm">
+                    <input type="checkbox" checked={allowedModels.includes(m.model)}
+                      onChange={(e) => setAllowedModels((cur) => e.target.checked ? [...cur, m.model] : cur.filter((x) => x !== m.model))} />
+                    <span className="mono text-xs">{m.model}</span>
+                    <span className="text-[11px] text-muted-foreground">{m.provider} · {m.tier}</span>
+                  </label>
+                ))
+              ) : (
+                liveModels.map((p) => (
+                  <div key={p.provider} className="mb-2">
+                    <div className="flex items-baseline gap-2 border-b border-border pb-1 text-[10px] uppercase tracking-[0.15em] text-muted-foreground">
+                      {PROVIDER_LABELS[p.provider] ?? p.provider}
+                      {!p.configured && <span className="normal-case tracking-normal">— no key configured</span>}
+                      {p.error && <span className="normal-case tracking-normal text-bad">— unreachable ({p.error})</span>}
+                      {p.configured && !p.error && <span className="normal-case tracking-normal">{p.models.length} models</span>}
+                    </div>
+                    {p.models.map((m) => (
+                      <label key={p.provider + m} className="flex cursor-pointer items-center gap-2 py-1 text-sm">
+                        <input type="checkbox" checked={allowedModels.includes(m)}
+                          onChange={(e) => setAllowedModels((cur) => e.target.checked ? [...cur, m] : cur.filter((x) => x !== m))} />
+                        <span className="mono text-xs">{m}</span>
+                      </label>
+                    ))}
+                  </div>
+                ))
+              )}
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <p className="text-[11px] text-muted-foreground">
+                  Requests routed to any other model are rejected with 403. Leave unchecked to allow all models the plan permits.
+                </p>
+                {liveModels !== null && (
+                  <button type="button" className="shrink-0 cursor-pointer text-[11px] text-muted-foreground underline hover:text-ink"
+                    onClick={() => loadModels(true)}>Refresh</button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
         <Button className="w-full" onClick={create}>Create key</Button>
       </Modal>
+    </div>
+  );
+}
+
+/* ───────────── Provider keys ───────────── */
+type ProviderKeyRow = {
+  provider: string;
+  source: "dashboard" | "env" | "none";
+  masked: string | null;
+  updated_at: string | null;
+};
+const PROVIDER_LABELS: Record<string, string> = {
+  ollama: "OpenInference (self-hosted)",
+  openai: "OpenAI", anthropic: "Anthropic", groq: "Groq",
+  mistral: "Mistral", cerebras: "Cerebras", gemini: "Gemini",
+};
+const PROVIDER_KEY_HINTS: Record<string, string> = {
+  openai: "sk-…", anthropic: "sk-ant-…", groq: "gsk_…",
+  mistral: "…", cerebras: "csk-…", gemini: "AIza…",
+};
+
+function ProvidersPanel() {
+  const [rows, setRows] = useState<ProviderKeyRow[] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [keyInput, setKeyInput] = useState("");
+
+  const load = () => api<{ data: ProviderKeyRow[] }>("/v1/admin/provider-keys").then((r) => setRows(r.data)).catch((e) => toast.error(e.message));
+  useEffect(() => { load(); }, []);
+
+  async function save() {
+    if (!editing) return;
+    if (keyInput.trim().length < 8) return toast.error("Key looks too short");
+    try {
+      await api(`/v1/admin/provider-keys/${editing}`, { method: "PUT", body: JSON.stringify({ api_key: keyInput.trim() }) });
+      toast.success(`${PROVIDER_LABELS[editing] ?? editing} key saved`);
+      setEditing(null); setKeyInput("");
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  }
+
+  async function removeOverride(provider: string) {
+    if (!window.confirm("Remove the dashboard key? The gateway falls back to the env var (if set).")) return;
+    try { await api(`/v1/admin/provider-keys/${provider}`, { method: "DELETE" }); toast.success("Dashboard key removed"); load(); }
+    catch (e: any) { toast.error(e.message); }
+  }
+
+  return (
+    <div>
+      <div className="mb-4">
+        <h3 className="text-sm font-medium">Provider keys</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Upstream LLM credentials used by the gateway. Keys set here are stored encrypted (AES-256-GCM) and
+          override the server's environment variables; removing one falls back to the env var.
+        </p>
+      </div>
+      <Card className="p-5">
+        {!rows ? <Loading /> : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="border-b border-border text-left text-[10px] uppercase tracking-[0.15em] text-muted-foreground">
+                <th className="py-2 pr-3 font-normal">Provider</th><th className="py-2 pr-3 font-normal">Key</th>
+                <th className="py-2 pr-3 font-normal">Source</th><th className="py-2 pr-3 font-normal">Updated</th><th className="py-2 font-normal"></th></tr></thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.provider} className="border-b border-border last:border-0">
+                    <td className="py-2 pr-3">{PROVIDER_LABELS[r.provider] ?? r.provider}</td>
+                    <td className="py-2 pr-3"><code className="mono text-xs">{r.masked ?? "—"}</code></td>
+                    <td className="py-2 pr-3">
+                      <Badge tone={r.source === "none" ? "bad" : "good"}>
+                        {r.source === "dashboard" ? "dashboard" : r.source === "env" ? "env var" : "not set"}
+                      </Badge>
+                    </td>
+                    <td className="py-2 pr-3 text-muted-foreground">{r.updated_at ? fmtDate(r.updated_at) : "—"}</td>
+                    <td className="py-2 text-right">
+                      <div className="flex justify-end gap-2">
+                        <Button variant="outline" onClick={() => { setEditing(r.provider); setKeyInput(""); }}>
+                          {r.source === "dashboard" ? "Update" : "Set key"}
+                        </Button>
+                        {r.source === "dashboard" && (
+                          <Button variant="danger" onClick={() => removeOverride(r.provider)}>Remove</Button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Modal open={!!editing} onClose={() => setEditing(null)} title={`${PROVIDER_LABELS[editing ?? ""] ?? editing} API key`}>
+        <div className="mb-3">
+          <Label>API key</Label>
+          <Input type="password" autoComplete="off" value={keyInput} onChange={(e) => setKeyInput(e.target.value)}
+            placeholder={PROVIDER_KEY_HINTS[editing ?? ""] ?? ""} />
+        </div>
+        <p className="mb-5 text-xs text-muted-foreground">
+          The key is sent once over HTTPS, encrypted at rest, and never shown again in full — only the first and last characters.
+        </p>
+        <Button className="w-full" onClick={save}>Save key</Button>
+      </Modal>
+    </div>
+  );
+}
+
+/* ───────────── Tenants ───────────── */
+type TenantRow = {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  created_at: string;
+  active_keys: number;
+  month_requests: number;
+  month_spend_usd: string | number;
+};
+const PLAN_TIERS: Record<string, string> = {
+  free: "small models only",
+  pro: "small + standard",
+  enterprise: "all models",
+};
+
+function TenantsPanel() {
+  const [rows, setRows] = useState<TenantRow[] | null>(null);
+  const [plans, setPlans] = useState<string[]>([]);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  const load = () =>
+    api<{ data: TenantRow[]; plans: string[] }>("/v1/admin/tenants")
+      .then((r) => { setRows(r.data); setPlans(r.plans); })
+      .catch((e) => toast.error(e.message));
+  useEffect(() => { load(); }, []);
+
+  async function changePlan(tenant: TenantRow, plan: string) {
+    if (plan === tenant.plan) return;
+    if (!window.confirm(`Move "${tenant.name}" from ${tenant.plan} to ${plan}? This changes which model tiers its API keys can call, effective immediately.`)) return;
+    setSaving(tenant.id);
+    try {
+      await api(`/v1/admin/tenants/${tenant.id}/plan`, { method: "PUT", body: JSON.stringify({ plan }) });
+      toast.success(`${tenant.name} is now on ${plan}`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+    finally { setSaving(null); }
+  }
+
+  return (
+    <div>
+      <div className="mb-4">
+        <h3 className="text-sm font-medium">Tenants</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Every workspace on this gateway. The plan decides which model tiers a tenant's API keys may
+          call — free: {PLAN_TIERS.free}, pro: {PLAN_TIERS.pro}, enterprise: {PLAN_TIERS.enterprise}.
+          Changes apply to the tenant's next request.
+        </p>
+      </div>
+      <Card className="p-5">
+        {!rows ? <Loading /> : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="border-b border-border text-left text-[10px] uppercase tracking-[0.15em] text-muted-foreground">
+                <th className="py-2 pr-3 font-normal">Tenant</th><th className="py-2 pr-3 font-normal">Plan</th>
+                <th className="py-2 pr-3 font-normal">Keys</th><th className="py-2 pr-3 font-normal">Requests (mo)</th>
+                <th className="py-2 pr-3 font-normal">Spend (mo)</th><th className="py-2 font-normal">Created</th></tr></thead>
+              <tbody>
+                {rows.map((t) => (
+                  <tr key={t.id} className="border-b border-border last:border-0">
+                    <td className="py-2 pr-3">
+                      <div>{t.name}</div>
+                      <div className="text-xs text-muted-foreground">{t.slug}</div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <Select value={t.plan} disabled={saving === t.id}
+                        onChange={(e) => changePlan(t, e.target.value)} title={PLAN_TIERS[t.plan]}>
+                        {(plans.length ? plans : [t.plan]).map((p) => <option key={p} value={p}>{p}</option>)}
+                      </Select>
+                    </td>
+                    <td className="py-2 pr-3">{t.active_keys}</td>
+                    <td className="py-2 pr-3">{fmtNum(t.month_requests)}</td>
+                    <td className="py-2 pr-3">{usd(t.month_spend_usd)}</td>
+                    <td className="py-2 text-muted-foreground">{fmtDate(t.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

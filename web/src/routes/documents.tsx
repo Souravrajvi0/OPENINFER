@@ -32,7 +32,7 @@ type RetrieveChunk = {
 const statusColor = (s: string): "good" | "bad" | "default" | "flame" =>
   s === "indexed" ? "good" : s === "failed" ? "bad" : "default";
 
-export function Docs() {
+export function Documents() {
   const { user } = useAuth();
   const [docs, setDocs] = useState<DocRow[] | null>(null);
   const [uploading, setUploading] = useState(false);

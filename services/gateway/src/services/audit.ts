@@ -12,6 +12,8 @@ export type AuditAction =
   | 'approval.approved' | 'approval.rejected'
   | 'approval_policy.created'
   | 'key_budget.set'
+  | 'provider_key.set' | 'provider_key.removed'
+  | 'tenant.plan_changed'
   | 'mcp_server.created'
   | 'test_suite.created' | 'test_run.completed'
   | 'org.created' | 'org.switched'

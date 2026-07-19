@@ -6,11 +6,13 @@ import { requireScope } from '../plugins/auth';
 import { checkGuardrails } from '../services/guardrails';
 import { bullmqConnection } from '../services/queueConnection';
 import { routeRequest, getAbRoute, getFallbackRoute, estimateTokens } from '../services/router';
+import { resolveRoute } from './openaiCompat';
 import { callLLM, streamLLM, estimateCost } from '../services/llm';
 import { planAllowsModel, tierForModel } from '../services/plans';
 import { startSpan, endSpan, flushSpans } from '../services/tracer';
 import { query } from '../db/client';
 import { searchDocuments } from '../services/retrieval';
+import { getProviderApiKey } from '../services/providerKeys';
 import { checkSemanticCache, storeInSemanticCache } from '../services/semanticCache';
 import { checkSpendLimits } from '../services/budget';
 import { writeAudit } from '../services/audit';
@@ -114,9 +116,29 @@ const chatRoute: FastifyPluginAsync = async (_fastify) => {
 
     // ── 2. Model routing ──────────────────────────────────────────────────
     const routeSpan = startSpan(traceId, 'gateway.routing', { parentId: guardrailSpan.id });
+
+    // Bare model id (no provider) — resolve which provider serves it via the
+    // live catalog + heuristics, instead of silently rerouting to the default.
+    let effectiveProvider: (typeof PROVIDERS)[number] | undefined = provider;
+    let effectiveModel = model;
+    if (model && !provider) {
+      const resolved = await resolveRoute(model);
+      if (!resolved) {
+        endSpan(routeSpan, 'error', 'model_not_found');
+        spans.push(routeSpan);
+        flushSpans(spans, request.tenantId);
+        return reply.status(404).send({
+          error: `Unknown model ${model} — no configured provider serves it. Use a model id from GET /v1/models, or a known provider prefix (openai/…, groq/…, openinference/…).`,
+          trace_id: traceId,
+        });
+      }
+      effectiveProvider = resolved.provider as (typeof PROVIDERS)[number];
+      effectiveModel = resolved.model;
+    }
+
     let routeDecision = routeRequest({
-      requested_provider: provider,
-      requested_model: model,
+      requested_provider: effectiveProvider,
+      requested_model: effectiveModel,
       estimated_tokens: estimateTokens(safeMessages.map((m) => m.content).join(' ')),
     });
 
@@ -129,11 +151,20 @@ const chatRoute: FastifyPluginAsync = async (_fastify) => {
     endSpan(routeSpan, 'ok');
     spans.push(routeSpan);
 
-    // ── 2a. Plan tier gating ──────────────────────────────────────────────
-    // The tenant's plan governs which model tiers its keys may reach.
-    if (!planAllowsModel(request.plan, routeDecision.model)) {
-      // No llm_requests row exists for a gated request, so omit requestId
-      // (spans record with a null request_id rather than violating the FK).
+    // ── 2a. Plan tier / per-key model allowlist ───────────────────────────
+    // Restricted keys: allowlist is the grant. Unrestricted keys: plan tiers.
+    if (request.allowedModels) {
+      const requestedModel = model ?? routeDecision.model;
+      if (!request.allowedModels.includes(requestedModel) && !request.allowedModels.includes(routeDecision.model)) {
+        flushSpans(spans, request.tenantId);
+        writeAudit({ tenant_id: request.tenantId, actor_type: 'api_key', actor_id: request.apiKeyId, action: 'request.filtered', details: { reason: 'model_not_allowed', model: routeDecision.model } });
+        return reply.status(403).send({
+          error: `This API key is not allowed to use model ${routeDecision.model}`,
+          allowed_models: request.allowedModels,
+          trace_id: traceId,
+        });
+      }
+    } else if (!planAllowsModel(request.plan, routeDecision.model)) {
       flushSpans(spans, request.tenantId);
       return reply.status(403).send({
         error: `Your plan (${request.plan}) cannot access model ${routeDecision.model} (tier: ${tierForModel(routeDecision.model)})`,
@@ -167,7 +198,7 @@ const chatRoute: FastifyPluginAsync = async (_fastify) => {
       const userQuery = activeMessages[activeMessages.length - 1]?.content ?? '';
       const ragSpan = startSpan(traceId, 'retrieval.search', { parentId: routeSpan.id });
       try {
-        if (config.MISTRAL_API_KEY) {
+        if (await getProviderApiKey('mistral')) {
           const hits = await searchDocuments(request.tenantId, userQuery, {
             top_k: rag.top_k ?? 5,
             hybrid: true,
@@ -224,7 +255,11 @@ const chatRoute: FastifyPluginAsync = async (_fastify) => {
       try {
         await pumpStream(routeDecision.provider, routeDecision.model);
       } catch (primaryErr) {
-        const fallback = getFallbackRoute();
+        // A fallback model the key isn't allowed to use is failed, not served.
+        const fallbackRoute = getFallbackRoute();
+        const fallback = fallbackRoute && (!request.allowedModels || request.allowedModels.includes(fallbackRoute.model))
+          ? fallbackRoute
+          : null;
         if (fallback) {
           try {
             fullContent = '';
@@ -307,14 +342,28 @@ const chatRoute: FastifyPluginAsync = async (_fastify) => {
     let fallbackUsed = false;
 
     try {
-      llmResult = await callLLM(routeDecision.provider, routeDecision.model, contextMessages);
-    } catch (primaryErr) {
-      const fallback = getFallbackRoute();
-      if (!fallback) throw primaryErr;
-      _fastify.log.warn({ primaryErr }, 'Primary LLM failed, trying fallback');
-      llmResult = await callLLM(fallback.provider, fallback.model, contextMessages);
-      usedRoute = fallback;
-      fallbackUsed = true;
+      try {
+        llmResult = await callLLM(routeDecision.provider, routeDecision.model, contextMessages);
+      } catch (primaryErr) {
+        const fallback = getFallbackRoute();
+        if (!fallback) throw primaryErr;
+        // A fallback model the key isn't allowed to use is failed, not served.
+        if (request.allowedModels && !request.allowedModels.includes(fallback.model)) throw primaryErr;
+        _fastify.log.warn({ primaryErr }, 'Primary LLM failed, trying fallback');
+        llmResult = await callLLM(fallback.provider, fallback.model, contextMessages);
+        usedRoute = fallback;
+        fallbackUsed = true;
+      }
+    } catch (err) {
+      endSpan(llmSpan, 'error', (err as Error).message);
+      spans.push(llmSpan);
+      flushSpans(spans, request.tenantId);
+      return reply.status(502).send({
+        error: (err as Error).message || 'Upstream model request failed',
+        model: routeDecision.model,
+        provider: routeDecision.provider,
+        trace_id: traceId,
+      });
     }
 
     const latencyMs = Date.now() - start;
@@ -338,7 +387,7 @@ const chatRoute: FastifyPluginAsync = async (_fastify) => {
           routed_model, fallback_used, prompt_tokens, completion_tokens,
           total_tokens, cost_usd, latency_ms, ttfb_ms,
           guardrail_triggered, guardrail_action, guardrail_reasons, http_status, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,'success',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,200,$21)`,
+       VALUES ($1,$2,$3,$4,$5,$6,'success',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,200,$22)`,
       [requestId, request.tenantId, request.apiKeyId, traceId, session_id ?? null, requestMode,
        safeMessages[safeMessages.length - 1]?.content.slice(0, 500), llmResult.content.slice(0, 500),
        model ?? null, usedRoute.provider, usedRoute.model, fallbackUsed,
